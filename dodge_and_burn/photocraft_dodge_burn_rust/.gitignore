@@ -1,0 +1,28 @@
+# Rust
+/target
+*.rs.bk
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# WASM
+*.wasm
+
+# Build-Artifacts
+build/
+dist/
+
+# Logs
+*.log
+
+# Environment
+.env
+.env.local
+.env.*.local

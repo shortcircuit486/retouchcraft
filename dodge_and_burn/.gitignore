@@ -1,0 +1,21 @@
+# Analysis files (internal documentation, not for publication)
+*.analyse.md
+erste_analyse.md
+retouch4me_analyse.md
+retouch4me_masken_analyse.md
+
+# IDE/Editor temporary files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Build artifacts (if any)
+*.o
+*.a
+*.so
+*.exe
+*.dll
+
+# Log files
+*.log
