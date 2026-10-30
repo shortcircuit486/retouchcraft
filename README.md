@@ -1,4 +1,4 @@
-# Retouchcraft
+# RetouchCraft
 
 Open-Source-Retuschier-Plugins für den Bildeditor [Photocraft](https://github.com/storytold/photocraft) —
 umgesetzt als **WebAssembly-Plugin (ABI v1)** in Rust. Photocraft hostet ausschließlich sandboxed
