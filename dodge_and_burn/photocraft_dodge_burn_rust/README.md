@@ -1,6 +1,6 @@
 # Photocraft Dodge & Burn Plugin (Rust/WASM)
 
-**Status:** v1.5.0 — produktiv getestet in Photocraft (Linux)
+**Status:** v1.6.0 — produktiv getestet in Photocraft (Linux)
 **Ziel:** Natives Photocraft-Plugin (ABI v1), das eine 50%-Neutralgrau-Korrekturmaske
 für Dodge & Burn auf Hautbereichen erzeugt.
 **Sprache:** Rust → WebAssembly (`wasm32-unknown-unknown`, keine externen Dependencies)
@@ -52,7 +52,7 @@ Referenz: <https://github.com/storytold/photocraft/blob/main/docs/plugins.md>
 | Budgets | 60 s Wallclock pro Run; 50 M + 4000/Sample Instruktionen pro Aufruf; 512 MiB lineares Memory pro Instanz; NaN/Inf-Ausgaben behalten den Originalwert |
 | Vorschau | läuft auf reduzierter Kopie; `px`-Parameter werden durch die Reduktion geteilt |
 
-## 4. Parameter (Manifest v1.5.0)
+## 4. Parameter (Manifest v1.6.0)
 
 | Parameter | Typ | Min | Max | Default | Bedeutung |
 |---|---|---|---|---|---|
@@ -66,14 +66,15 @@ Referenz: <https://github.com/storytold/photocraft/blob/main/docs/plugins.md>
 Manifest: `overlap: 60` (≥ `macro_radius`-Default, damit Kachel-Ränder korrekte
 Kontextpixel haben), `area: "canvas"`, `kind: "filter"`.
 
-## 5. Algorithmus (v1.5.0)
+## 5. Algorithmus (v1.6.0)
 
 1. **Adaptives Zellraster (Performance):** Photocraft interpretiert WASM über wasmi
    (~10–100× langsamer als nativ). Der Guided Filter über jedes Pixel eines
    100-MP-Dokuments sprengt das 60-s-Budget. Die Korrektur ist bandbegrenzt
    (alle Radien ≥ `blemish_radius`), daher wird auf einem dokumentglobalen
    Zellraster gerechnet (Ziel ~2 M Zellen; `scale = ceil(sqrt(canvasPx / 2M))`,
-   gedeckelt auf `blemish_radius`) und das Ergebnis **bilinear hochgerechnet**.
+   gedeckelt auf `blemish_radius/3`, damit Blemish-Spots mit mehreren Zellen
+   aufgeloest werden) und das Ergebnis **bilinear hochgerechnet**.
    Ausrichtung am Dokumentraster via `_image.x/y` (nahtfrei über Kachelgrenzen).
    Kachel-Ränder (aus `_image.overlap`) bekommen konstant 0.5. Bei `scale == 1`
    (kleine Dokumente) ist das Verhalten bit-identisch zur pixel-weisen Rechnung.
@@ -130,6 +131,7 @@ Benchmarks (ignoriert, manuell): `cargo test --test test_plugin --release -- --i
 | 1.3.0 | Adaptives dokumentglobales Zellraster + bilineares Hochrechnen (Zeitbudget-Fix); Guided-Self-Filter; Tests + Benchmarks |
 | 1.4.0 | Deadzone+Gamma-Kurve — **Regression** (löscht feine Korrekturen, 88 % neutral); nicht verwenden |
 | **1.5.0** | S1–S3: Deadzone entfernt, kontinuierliche Basiskurve 0.5·\|Δ\|^0.85, röte-basierte Blemish-Spot-Schicht; Korrelation zur R4m-Referenzmaske 0,487 |
+| **1.6.0** | S4: Zellraster feiner — scale-Cap `blemish_radius/3` (Vollbild s=8→4, HP-std 0,20→~0,36; Kachel-Bench 4,85 ms, Zeitbudget weiterhin eingehalten) |
 
 ## 9. Limitationen / Offen
 
