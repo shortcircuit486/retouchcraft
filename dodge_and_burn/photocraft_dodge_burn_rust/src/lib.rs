@@ -5,7 +5,7 @@
 //
 // Autor: Daniel
 // Datum: 30. Oktober 2026
-// Version: 1.6.0 (S4: Zellraster feiner, scale-Cap blemish_radius/3)
+// Version: 1.7.0 (S5: Burn-Cap -9 u8 + Burn-Floor -2 u8 auf Haut, Retouch4me-Profil)
 
 // Standard-Bibliothek verwenden
 use std::slice;
@@ -24,7 +24,7 @@ const MAX_MEMORY: usize = 512 * 1024 * 1024; // 536870912 Bytes
 const MANIFEST: &str = r#"{
   "id": "de.daniel.photocraft.dodge_burn",
   "name": "Dodge & Burn Mask",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "kind": "filter",
   "author": "Daniel",
   "description": "Generiert eine 50% Neutralgrau-Maske für Dodge & Burn Korrekturen. Fügen Sie die Maske als Ebene mit Soft-Light-Modus ein.",
@@ -326,6 +326,12 @@ const SPOT_THRESHOLD: f32 = 0.020;         // Maskeneinheiten (u8/255)
 const SPOT_GAMMA: f32 = 0.8;
 const SPOT_GAIN: f32 = 2.2;
 
+// Burn-Asymmetrie (Retouch4me-Profil): Burn bleibt flach und gedeckelt
+// (echte R4m-Masken: Burn-Tail nur bis ca. -9 u8), dazu ein dezenter
+// Burn-Floor auf Haut (R4m: Modus 127, ~76% der Pixel in 125-129).
+const BURN_CAP: f32 = -9.0 / 255.0;
+const BURN_FLOOR: f32 = -2.0 / 255.0;
+
 /// Nichtlineare Kurve mit optionaler Deadzone: unterhalb der Deadzone exakt
 /// neutral, darüber gain * x^gamma. Die Basis nutzt Deadzone 0 (kontinuierlich),
 /// die Spot-Schicht nutzt die Deadzone als Schwellwert.
@@ -610,6 +616,8 @@ pub extern "C" fn pc_filter(
             correction_curve(delta.max(0.0), 0.0, BASE_GAMMA, BASE_GAIN) * dodge_strength;
         let burn_part =
             -correction_curve((-delta).max(0.0), 0.0, BASE_GAMMA, BASE_GAIN) * burn_strength;
+        // Burn-Deckel: Retouch4me dunkelt nur moderat ab (Tail bis ca. -9 u8)
+        let burn_part = burn_part.max(BURN_CAP);
 
         // Blemish-Spot-Schicht (additiv, nur Dodge): gerötete, lokal
         // dunkle Hautstellen gezielt aufhellen (Retouch4me-Hotspots)
@@ -620,7 +628,8 @@ pub extern "C" fn pc_filter(
         let spot =
             correction_curve(spot_score, SPOT_THRESHOLD, SPOT_GAMMA, SPOT_GAIN) * dodge_strength;
 
-        let correction = (dodge_part + burn_part + spot) * intensity * skin_mask[c];
+        let correction = (dodge_part + burn_part + spot) * intensity * skin_mask[c]
+            + BURN_FLOOR * skin_mask[c];
 
         // Begrenzung auf ±0.3 (30% um 0.5 → 0.2 bis 0.8)
         let clamped = correction.max(-0.3).min(0.3);
