@@ -5,7 +5,7 @@
 //
 // Autor: Daniel
 // Datum: 30. Oktober 2026
-// Version: 1.3.0 (Performance: adaptive Zellraster-Berechnung gegen das Host-Zeitbudget)
+// Version: 1.5.0 (S1-S3: kontinuierliche Basiskurve + Röte-basierte Blemish-Spots)
 
 // Standard-Bibliothek verwenden
 use std::slice;
@@ -24,7 +24,7 @@ const MAX_MEMORY: usize = 512 * 1024 * 1024; // 536870912 Bytes
 const MANIFEST: &str = r#"{
   "id": "de.daniel.photocraft.dodge_burn",
   "name": "Dodge & Burn Mask",
-  "version": "1.3.0",
+  "version": "1.5.0",
   "kind": "filter",
   "author": "Daniel",
   "description": "Generiert eine 50% Neutralgrau-Maske für Dodge & Burn Korrekturen. Fügen Sie die Maske als Ebene mit Soft-Light-Modus ein.",
@@ -307,6 +307,39 @@ fn compute_skin_probability(r: f32, g: f32, b: f32) -> f32 {
 }
 
 // ============================================================================
+// KORREKTURKURVEN (kalibriert gegen echte Retouch4me-Masken)
+// ============================================================================
+
+// Basis-Kurve: kontinuierlich, KEINE Deadzone. Liefert das feine, überall
+// vorhandene Korrekturfeld (Retouch4me: ~47% der Pixel mit 0.5-5 u8-Stufen).
+const BASE_GAMMA: f32 = 0.85;
+const BASE_GAIN: f32 = 0.5;
+
+// Blemish-Spot-Schicht (additiv, nur Dodge): gerötete, lokal dunkle
+// Hautstellen werden gezielt aufgehellt. Lineare Regression gegen die echte
+// Retouch4me-Maske: Röte ist der stärkste Prädiktor, breite dunkle
+// Schattierung (dunkel ggü. Makro-Ebene) ist KEIN Blemish (negatives Gewicht).
+const SPOT_RED_WEIGHT: f32 = 30.0;         // u8 pro (r - g)
+const SPOT_DARK_MID_WEIGHT: f32 = 21.0;    // u8, dunkel ggü. mittlerer Ebene
+const SPOT_DARK_MACRO_WEIGHT: f32 = -10.0; // u8, dunkel ggü. Makro-Ebene
+const SPOT_THRESHOLD: f32 = 0.020;         // Maskeneinheiten (u8/255)
+const SPOT_GAMMA: f32 = 0.8;
+const SPOT_GAIN: f32 = 2.2;
+
+/// Nichtlineare Kurve mit optionaler Deadzone: unterhalb der Deadzone exakt
+/// neutral, darüber gain * x^gamma. Die Basis nutzt Deadzone 0 (kontinuierlich),
+/// die Spot-Schicht nutzt die Deadzone als Schwellwert.
+#[inline]
+fn correction_curve(x: f32, deadzone: f32, gamma: f32, gain: f32) -> f32 {
+    if x <= deadzone {
+        0.0
+    } else {
+        let m = x - deadzone;
+        gain * m.powf(gamma)
+    }
+}
+
+// ============================================================================
 // ABI v1 EXPORTS
 // ============================================================================
 
@@ -538,6 +571,7 @@ pub extern "C" fn pc_filter(
     }
 
     let mut lum = vec![0.0f32; cell_count];
+    let mut redness = vec![0.0f32; cell_count];
     let mut skin_mask = vec![1.0f32; cell_count];
     for c in 0..cell_count {
         let n = if cell_cnt[c] > 0.0 { cell_cnt[c] } else { 1.0 };
@@ -545,6 +579,7 @@ pub extern "C" fn pc_filter(
         let g = sum_g[c] / n;
         let b = sum_b[c] / n;
         lum[c] = rgb_to_luminance(r, g, b);
+        redness[c] = r - g;
         if channels_usize >= 3 {
             skin_mask[c] = compute_skin_probability(r, g, b);
         }
@@ -567,13 +602,25 @@ pub extern "C" fn pc_filter(
     for c in 0..cell_count {
         let delta = macro_lum[c] - mid_lum[c];
 
-        // Asymmetrische Gewichtung
-        let dodge = delta.max(0.0) * dodge_strength;
-        let burn = delta.min(0.0) * burn_strength;
-        let correction = (dodge + burn) * intensity * skin_mask[c];
+        // Kontinuierliche Basis (keine Deadzone): feines, überall
+        // vorhandenes Korrekturfeld
+        let dodge_part =
+            correction_curve(delta.max(0.0), 0.0, BASE_GAMMA, BASE_GAIN) * dodge_strength;
+        let burn_part =
+            -correction_curve((-delta).max(0.0), 0.0, BASE_GAMMA, BASE_GAIN) * burn_strength;
 
-        // Skalierung auf volle Stärke (1.0)
-        // und Begrenzung auf ±0.3 (30% um 0.5 → 0.2 bis 0.8)
+        // Blemish-Spot-Schicht (additiv, nur Dodge): gerötete, lokal
+        // dunkle Hautstellen gezielt aufhellen (Retouch4me-Hotspots)
+        let spot_score = (SPOT_RED_WEIGHT * redness[c]
+            + SPOT_DARK_MID_WEIGHT * (mid_lum[c] - lum[c]).max(0.0)
+            + SPOT_DARK_MACRO_WEIGHT * (macro_lum[c] - lum[c]).max(0.0))
+            / 255.0;
+        let spot =
+            correction_curve(spot_score, SPOT_THRESHOLD, SPOT_GAMMA, SPOT_GAIN) * dodge_strength;
+
+        let correction = (dodge_part + burn_part + spot) * intensity * skin_mask[c];
+
+        // Begrenzung auf ±0.3 (30% um 0.5 → 0.2 bis 0.8)
         let clamped = correction.max(-0.3).min(0.3);
         mask_cell[c] = 0.5 + clamped;
     }
@@ -716,5 +763,22 @@ mod tests {
         // Test mit Rot (1,0,0)
         let lum = rgb_to_luminance(1.0, 0.0, 0.0);
         assert!((lum - 0.299).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_correction_curve() {
+        // Unterhalb der Deadzone: exakt neutral
+        assert_eq!(correction_curve(0.0, 0.025, 0.65, 1.2), 0.0);
+        assert_eq!(correction_curve(0.025, 0.025, 0.65, 1.2), 0.0);
+
+        // Monotonie oberhalb der Deadzone
+        let a = correction_curve(0.05, 0.025, 0.65, 1.2);
+        let b = correction_curve(0.15, 0.025, 0.65, 1.2);
+        assert!(a > 0.0 && b > a);
+
+        // Gamma < 1: 40-facher Abstand über der Deadzone ergibt 40^0.65 ≈ 11x
+        let small = correction_curve(0.03, 0.025, 0.65, 1.2);  // m = 0.005
+        let big = correction_curve(0.225, 0.025, 0.65, 1.2);  // m = 0.200
+        assert!(big > small * 10.5 && big < small * 11.5);
     }
 }
