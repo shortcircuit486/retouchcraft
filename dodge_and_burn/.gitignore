@@ -19,3 +19,7 @@ retouch4me_masken_analyse.md
 
 # Log files
 *.log
+
+# WASM: nur das aktuelle Plugin-Binary wird versioniert
+*.wasm
+!photocraft_dodge_burn.wasm
