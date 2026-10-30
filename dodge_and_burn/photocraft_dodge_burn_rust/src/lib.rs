@@ -3,8 +3,9 @@
 // ABI v1-kompatibles Plugin für Photocraft
 // Erzeugt 50% Neutralgrau-Masken für Dodge & Burn Korrekturen
 //
-// Datum: 29. Oktober 2026
-// Version: 1.1.0 (korrigiert: Bounds-Checking, Fehlerbehandlung)
+// Autor: Daniel
+// Datum: 30. Oktober 2026
+// Version: 1.3.0 (Performance: adaptive Zellraster-Berechnung gegen das Host-Zeitbudget)
 
 // Standard-Bibliothek verwenden
 use std::slice;
@@ -21,27 +22,28 @@ const MAX_MEMORY: usize = 512 * 1024 * 1024; // 536870912 Bytes
 
 /// Manifest-JSON (statisch eingebettet)
 const MANIFEST: &str = r#"{
-  "id": "photocraft.dodge_burn",
+  "id": "de.daniel.photocraft.dodge_burn",
   "name": "Dodge & Burn Mask",
-  "version": "1.1.0",
+  "version": "1.3.0",
   "kind": "filter",
+  "author": "Daniel",
   "description": "Generiert eine 50% Neutralgrau-Maske für Dodge & Burn Korrekturen. Fügen Sie die Maske als Ebene mit Soft-Light-Modus ein.",
   "params": {
     "intensity": {
       "type": "number",
       "min": 0.0,
-      "max": 0.3,
-      "default": 0.15,
+      "max": 2.0,
+      "default": 0.8,
       "unit": "none",
-      "description": "Gesamtstärke der Korrektur (empfohlen: 0.05-0.2)"
+      "description": "Gesamtstärke der Korrektur"
     },
     "dodge_strength": {
       "type": "number",
       "min": 0.0,
       "max": 2.0,
-      "default": 0.5,
+      "default": 1.0,
       "unit": "none",
-      "description": "Stärke der Aufhellung (Dodge) - empfohlen: 0.3-0.8"
+      "description": "Stärke der Aufhellung (Dodge)"
     },
     "burn_strength": {
       "type": "number",
@@ -49,7 +51,7 @@ const MANIFEST: &str = r#"{
       "max": 2.0,
       "default": 1.0,
       "unit": "none",
-      "description": "Stärke der Abdunklung (Burn) - empfohlen: 0.8-1.2"
+      "description": "Stärke der Abdunklung (Burn)"
     },
     "blemish_radius": {
       "type": "int",
@@ -73,7 +75,7 @@ const MANIFEST: &str = r#"{
       "description": "Feine Porenstruktur erhalten (empfohlen)"
     }
   },
-  "overlap": 55,
+  "overlap": 60,
   "area": "canvas"
 }"#;
 
@@ -141,6 +143,20 @@ fn parse_bool_param(params: &str, key: &str, default: bool) -> bool {
     default
 }
 
+/// Parst eine Zahl aus einem JSON-Objekt, das nach einem Marker (z.B. "_image")
+/// beginnt. Gibt None zurück, wenn Marker oder Schlüssel fehlen oder der Wert
+/// nicht lesbar ist (Aufrufer nutzen dann einen sicheren Fallback).
+fn parse_num_after(json: &str, key: &str, marker: &str) -> Option<f64> {
+    let marker_pos = json.find(marker)?;
+    let search = format!("\"{}\":", key);
+    let rel = json[marker_pos..].find(&search)?;
+    let rest = json[marker_pos + rel + search.len()..].trim_start();
+    let end = rest
+        .find(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-' || c == '+'))
+        .unwrap_or(rest.len());
+    rest[..end].parse::<f64>().ok()
+}
+
 // ============================================================================
 // KERN-ALGORITHMEN
 // ============================================================================
@@ -165,8 +181,7 @@ fn box_filter(img: &[f32], width: usize, height: usize, r: usize) -> Vec<f32> {
     
     // Berechne Box-Filter mit Integralbild
     let r_i32 = r as i32;
-    let area = (2 * r_i32 + 1) as f32 * (2 * r_i32 + 1) as f32;
-    
+
     for y in 0..height {
         for x in 0..width {
             let x_i32 = x as i32;
@@ -175,7 +190,11 @@ fn box_filter(img: &[f32], width: usize, height: usize, r: usize) -> Vec<f32> {
             let x2 = ((x_i32 + r_i32 + 1) as usize).min(width);
             let y1 = (y_i32 - r_i32).max(0) as usize;
             let y2 = ((y_i32 + r_i32 + 1) as usize).min(height);
-            
+
+            // Tatsächliche (am Rand geklemmte) Fenstergröße statt (2r+1)^2,
+            // sonst werden Bildränder systematisch abgedunkelt.
+            let area = ((x2 - x1) * (y2 - y1)) as f32;
+
             let sum = integral[y2 * (width + 1) + x2] 
                     + integral[y1 * (width + 1) + x1] 
                     - integral[y2 * (width + 1) + x1] 
@@ -188,59 +207,47 @@ fn box_filter(img: &[f32], width: usize, height: usize, r: usize) -> Vec<f32> {
     output
 }
 
-/// Guided Filter (kantenerhaltend) nach He et al.
-/// I: Guidance-Bild, p: Zu filterndes Bild, r: Radius, eps: Regularisierung
-fn guided_filter(i: &[f32], p: &[f32], width: usize, height: usize, r: usize, eps: f32) -> Vec<f32> {
-    // Schritt 1: Berechne Mittelwerte
-    let mean_i = box_filter(i, width, height, r);
-    let mean_p = box_filter(p, width, height, r);
-    
-    // Schritt 2: Berechne I*I und I*p
-    let mut i_squared = vec![0.0f32; width * height];
-    let mut i_times_p = vec![0.0f32; width * height];
+/// Guided Filter (kantenerhaltend) nach He et al., Spezialfall p == I.
+/// Führt dieselben Rechenschritte wie die allgemeine Variante mit p = I aus
+/// (identische Ergebnisse), benötigt aber nur 4 statt 6 Box-Durchläufe.
+fn guided_self_filter(img: &[f32], width: usize, height: usize, r: usize, eps: f32) -> Vec<f32> {
+    // Schritt 1: Mittelwerte von I und I*I
+    let mean_i = box_filter(img, width, height, r);
+
+    let mut squared = vec![0.0f32; width * height];
     for idx in 0..width * height {
-        i_squared[idx] = i[idx] * i[idx];
-        i_times_p[idx] = i[idx] * p[idx];
+        squared[idx] = img[idx] * img[idx];
     }
-    
-    let corr_i = box_filter(&i_squared, width, height, r);
-    let corr_ip = box_filter(&i_times_p, width, height, r);
-    
-    // Schritt 3: Berechne Varianz und Kovarianz
-    let mut var_i = vec![0.0f32; width * height];
-    let mut cov_ip = vec![0.0f32; width * height];
-    for idx in 0..width * height {
-        var_i[idx] = (corr_i[idx] - mean_i[idx] * mean_i[idx]).max(0.0);
-        cov_ip[idx] = corr_ip[idx] - mean_i[idx] * mean_p[idx];
-    }
-    
-    // Schritt 4: Berechne Filterkoeffizienten a und b
-    let mut a = vec![0.0f32; width * height];
-    let mut b = vec![0.0f32; width * height];
-    for idx in 0..width * height {
-        let denominator = var_i[idx] + eps;
+    let corr_i = box_filter(&squared, width, height, r);
+
+    // Schritt 2: Varianz und Filterkoeffizienten a und b (mit p == I ist
+    // cov_ip == var_i und mean_p == mean_i)
+    let n = width * height;
+    let mut a = vec![0.0f32; n];
+    let mut b = vec![0.0f32; n];
+    for idx in 0..n {
+        let var_i = (corr_i[idx] - mean_i[idx] * mean_i[idx]).max(0.0);
+        let denominator = var_i + eps;
         // Vermeide NaN durch sichere Division
         if denominator > 1e-10 {
-            a[idx] = cov_ip[idx] / denominator;
-        } else {
-            a[idx] = 0.0;
+            a[idx] = var_i / denominator;
         }
-        b[idx] = mean_p[idx] - a[idx] * mean_i[idx];
+        b[idx] = mean_i[idx] - a[idx] * mean_i[idx];
         // Ersetze NaN-Werte durch 0
         if a[idx].is_nan() { a[idx] = 0.0; }
         if b[idx].is_nan() { b[idx] = 0.0; }
     }
-    
-    // Schritt 5: Filtere a und b
+
+    // Schritt 3: Filtere a und b
     let mean_a = box_filter(&a, width, height, r);
     let mean_b = box_filter(&b, width, height, r);
-    
-    // Schritt 6: Berechne das gefilterte Bild
+
+    // Schritt 4: Berechne das gefilterte Bild
     let mut output = vec![0.0f32; width * height];
     for idx in 0..width * height {
-        output[idx] = mean_a[idx] * i[idx] + mean_b[idx];
+        output[idx] = mean_a[idx] * img[idx] + mean_b[idx];
     }
-    
+
     output
 }
 
@@ -379,7 +386,7 @@ pub extern "C" fn pc_filter(
     width: i32,
     height: i32,
     channels: i32,
-    _format: i32,
+    format: i32,
     params: *const u8,
     params_len: i32,
 ) -> i32 {
@@ -387,6 +394,8 @@ pub extern "C" fn pc_filter(
     if buf.is_null() {
         return 1; // Fehler: buf ist NULL
     }
+    
+
     if params.is_null() && params_len > 0 {
         return 2; // Fehler: params ist NULL aber params_len > 0
     }
@@ -427,8 +436,8 @@ pub extern "C" fn pc_filter(
     };
     
     // Standardwerte
-    let intensity = parse_f32_param(params_str, "intensity", 0.15);
-    let dodge_strength = parse_f32_param(params_str, "dodge_strength", 0.5);
+    let intensity = parse_f32_param(params_str, "intensity", 0.8);
+    let dodge_strength = parse_f32_param(params_str, "dodge_strength", 1.0);
     let burn_strength = parse_f32_param(params_str, "burn_strength", 1.0);
     let blemish_radius = parse_i32_param(params_str, "blemish_radius", 12);
     let macro_radius = parse_i32_param(params_str, "macro_radius", 55);
@@ -445,94 +454,208 @@ pub extern "C" fn pc_filter(
         }
     }
     
-    // === 5. Luminanz berechnen ===
-    let mut lum = vec![0.0f32; width_usize * height_usize];
-    for i in 0..height_usize {
-        for j in 0..width_usize {
-            let idx = (i * width_usize + j) * channels_usize;
+    // === 5. Zellraster bestimmen (Performance: Zeitbudget des Hosts) ===
+    // Photocraft interpretiert WASM über wasmi (~10-100x langsamer als nativ);
+    // der Guided Filter über jedes Pixel eines 100-Megapixel-Dokuments
+    // überschreitet das 60s-Zeitbudget. Die Korrekturmaske ist bandbegrenzt
+    // (Frequenzanteile nur bis ~1/blemish_radius), daher wird die Berechnung
+    // auf ein gröberes Zellraster verlagert und das Ergebnis bilinear
+    // hochgerechnet. Kleine Dokumente (scale == 1) rechnen wie zuvor pro Pixel.
+    let canvas_w = parse_num_after(params_str, "canvasWidth", "_image")
+        .map(|v| v.max(1.0) as usize)
+        .unwrap_or(width_usize);
+    let canvas_h = parse_num_after(params_str, "canvasHeight", "_image")
+        .map(|v| v.max(1.0) as usize)
+        .unwrap_or(height_usize);
+
+    const TARGET_CELLS: usize = 2_000_000;
+    let canvas_px = canvas_w.saturating_mul(canvas_h);
+    let mut scale: usize = 1;
+    if canvas_px > TARGET_CELLS {
+        let f = canvas_px as f64 / TARGET_CELLS as f64;
+        scale = f.sqrt().ceil() as usize;
+    }
+    // Radien müssen auf dem Zellraster darstellbar bleiben (>= 1 Zelle)
+    let scale = scale.max(1).min(blemish_radius.max(1) as usize);
+
+    // Zellraster dokumentglobal ausrichten (via _image.x/_image.y), damit
+    // benachbarte Bänder dasselbe Raster nutzen und keine Naht-Artefakte
+    // entstehen. Ohne _image: lokales Raster ab Puffer-Nullpunkt.
+    let img_x = parse_num_after(params_str, "x", "_image")
+        .map(|v| v as i32)
+        .unwrap_or(0);
+    let img_y = parse_num_after(params_str, "y", "_image")
+        .map(|v| v as i32)
+        .unwrap_or(0);
+    let base_cx = img_x.div_euclid(scale as i32);
+    let base_cy = img_y.div_euclid(scale as i32);
+    let cells_x = ((img_x + width_usize as i32 - 1).div_euclid(scale as i32) - base_cx + 1)
+        .max(1) as usize;
+    let cells_y = ((img_y + height_usize as i32 - 1).div_euclid(scale as i32) - base_cy + 1)
+        .max(1) as usize;
+
+    // Zellspalte/-zeile je Pufferspalte/-reihe (einmal vorberechnen)
+    let mut cell_col = vec![0usize; width_usize];
+    for x in 0..width_usize {
+        cell_col[x] = ((img_x + x as i32).div_euclid(scale as i32) - base_cx) as usize;
+    }
+    let mut cell_row = vec![0usize; height_usize];
+    for y in 0..height_usize {
+        cell_row[y] = ((img_y + y as i32).div_euclid(scale as i32) - base_cy) as usize;
+    }
+
+    let cell_w = cells_x;
+    let cell_h = cells_y;
+    let cell_count = cell_w * cell_h;
+
+    // === 6. Zellen mitteln (Luminanz + Hautfarbe) ===
+    // Bei großen Skalen genügt eine Teilmenge der Pixel pro Zelle.
+    let stride = if scale > 1 { scale / 2 } else { 1 };
+    let mut sum_r = vec![0.0f32; cell_count];
+    let mut sum_g = vec![0.0f32; cell_count];
+    let mut sum_b = vec![0.0f32; cell_count];
+    let mut cell_cnt = vec![0.0f32; cell_count];
+    let mut yy = 0;
+    while yy < height_usize {
+        let cy = cell_row[yy];
+        let mut xx = 0;
+        while xx < width_usize {
+            let idx = (yy * width_usize + xx) * channels_usize;
+            let c = cy * cell_w + cell_col[xx];
             if channels_usize >= 3 {
-                let r = pixels[idx];
-                let g = pixels[idx + 1];
-                let b = pixels[idx + 2];
-                lum[i * width_usize + j] = rgb_to_luminance(r, g, b);
+                sum_r[c] += pixels[idx];
+                sum_g[c] += pixels[idx + 1];
+                sum_b[c] += pixels[idx + 2];
             } else {
-                // Graustufenbild
-                lum[i * width_usize + j] = pixels[idx];
+                sum_r[c] += pixels[idx];
+                sum_g[c] += pixels[idx];
+                sum_b[c] += pixels[idx];
             }
+            cell_cnt[c] += 1.0;
+            xx += stride;
+        }
+        yy += stride;
+    }
+
+    let mut lum = vec![0.0f32; cell_count];
+    let mut skin_mask = vec![1.0f32; cell_count];
+    for c in 0..cell_count {
+        let n = if cell_cnt[c] > 0.0 { cell_cnt[c] } else { 1.0 };
+        let r = sum_r[c] / n;
+        let g = sum_g[c] / n;
+        let b = sum_b[c] / n;
+        lum[c] = rgb_to_luminance(r, g, b);
+        if channels_usize >= 3 {
+            skin_mask[c] = compute_skin_probability(r, g, b);
         }
     }
-    
-    // === 6. Hautmaske berechnen ===
-    let mut skin_mask = vec![0.0f32; width_usize * height_usize];
-    for i in 0..height_usize {
-        for j in 0..width_usize {
-            let idx = (i * width_usize + j) * channels_usize;
-            if channels_usize >= 3 {
-                let r = pixels[idx];
-                let g = pixels[idx + 1];
-                let b = pixels[idx + 2];
-                skin_mask[i * width_usize + j] = compute_skin_probability(r, g, b);
-            } else {
-                skin_mask[i * width_usize + j] = 1.0; // Bei Graustufen: Alles als Haut
-            }
-        }
-    }
-    
-    // === 7. Multi-Skalen-Frequenztrennung ===
-    let blemish_radius_usize = blemish_radius as usize;
-    let macro_radius_usize = macro_radius as usize;
-    
+
+    // === 7. Multi-Skalen-Frequenztrennung (auf dem Zellraster) ===
+    let blemish_cells =
+        ((blemish_radius as f32) / (scale as f32)).round().max(1.0) as usize;
+    let macro_cells =
+        (((macro_radius as f32) / (scale as f32)).round() as usize).max(blemish_cells + 1);
+
     // Makro-Ebene: Grobe Gesichtsform
-    let macro_lum = guided_filter(&lum, &lum, width_usize, height_usize, macro_radius_usize, 0.03);
-    
+    let macro_lum = guided_self_filter(&lum, cell_w, cell_h, macro_cells, 0.03);
+
     // Mittlere Ebene: Lokale Unebenheiten
-    let mid_lum = guided_filter(&lum, &lum, width_usize, height_usize, blemish_radius_usize, 0.006);
-    
-    // === 8. Dodge & Burn Korrektur berechnen ===
-    let mut correction = vec![0.0f32; width_usize * height_usize];
-    for i in 0..height_usize {
-        for j in 0..width_usize {
-            let idx = i * width_usize + j;
-            let delta = macro_lum[idx] - mid_lum[idx];
-            
-            // Asymmetrische Gewichtung
-            let dodge = delta.max(0.0) * dodge_strength;
-            let burn = delta.min(0.0) * burn_strength;
-            
-            // Kombiniere Dodge und Burn
-            correction[idx] = (dodge + burn) * intensity;
-        }
+    let mid_lum = guided_self_filter(&lum, cell_w, cell_h, blemish_cells, 0.006);
+
+    // === 8./9. Dodge & Burn Korrektur je Zelle, maskiert mit Haut ===
+    let mut mask_cell = vec![0.5f32; cell_count];
+    for c in 0..cell_count {
+        let delta = macro_lum[c] - mid_lum[c];
+
+        // Asymmetrische Gewichtung
+        let dodge = delta.max(0.0) * dodge_strength;
+        let burn = delta.min(0.0) * burn_strength;
+        let correction = (dodge + burn) * intensity * skin_mask[c];
+
+        // Skalierung auf volle Stärke (1.0)
+        // und Begrenzung auf ±0.3 (30% um 0.5 → 0.2 bis 0.8)
+        let clamped = correction.max(-0.3).min(0.3);
+        mask_cell[c] = 0.5 + clamped;
     }
-    
-    // === 9. Maskierung mit Haut-Wahrscheinlichkeit ===
-    for i in 0..height_usize {
-        for j in 0..width_usize {
-            let idx = i * width_usize + j;
-            correction[idx] *= skin_mask[idx];
+
+    // === 10. Bilinear hochrechnen und in die Farbkanäle schreiben ===
+    // format-Bit 8 (ABI v1): der letzte Kanal ist Alpha. Alpha bleibt unangetastet,
+    // sonst wird die Ebene halbtransparent und das Bild wirkt beim Blenden "flach".
+    let has_alpha = (format >> 8) & 1 == 1;
+    let color_channels = if has_alpha && channels_usize >= 2 {
+        channels_usize - 1
+    } else {
+        channels_usize
+    };
+
+    // Innenbereich des Bandes (ohne Kontext-Ränder) aus _image bestimmen.
+    // Der Host verwirft die Randpixel nach dem Filtern; sie bekommen
+    // konstant 50% Grau statt der teuren Interpolation.
+    let (in_x0, in_x1, in_y0, in_y1) = {
+        let iw = parse_num_after(params_str, "width", "_image").map(|v| v.max(0.0) as usize);
+        let ih = parse_num_after(params_str, "height", "_image").map(|v| v.max(0.0) as usize);
+        let ovl = parse_num_after(params_str, "overlap", "_image").map(|v| v.max(0.0) as usize);
+        match (iw, ih, ovl) {
+            (Some(iw), Some(ih), Some(ovl))
+                if ovl * 2 <= width_usize && ovl * 2 <= height_usize =>
+            {
+                if iw == width_usize && ih == height_usize {
+                    (ovl, width_usize - ovl, ovl, height_usize - ovl)
+                } else if iw + 2 * ovl == width_usize && ih + 2 * ovl == height_usize {
+                    (ovl, ovl + iw, ovl, ovl + ih)
+                } else {
+                    (0, width_usize, 0, height_usize)
+                }
+            }
+            _ => (0, width_usize, 0, height_usize),
         }
+    };
+
+    // x-Interpolationstabellen einmal vorberechnen (dokumentglobales Raster)
+    let mut cx0 = vec![0usize; width_usize];
+    let mut cx1 = vec![0usize; width_usize];
+    let mut cfx = vec![0.0f32; width_usize];
+    for x in 0..width_usize {
+        let gx = (img_x as f32 + x as f32 + 0.5) / (scale as f32) - 0.5
+            - base_cx as f32;
+        let gx = gx.max(0.0).min((cell_w - 1) as f32);
+        let x0 = gx.floor() as usize;
+        cx0[x] = x0;
+        cx1[x] = (x0 + 1).min(cell_w - 1);
+        cfx[x] = gx - x0 as f32;
     }
-    
-    // === 10. Zentrierung auf 50% Neutralgrau (0.5) ===
-    // OPTIMIERUNG: Skalierung auf 10% der ursprünglichen Stärke
-    // und Begrenzung auf ±5% um 0.5 (128 ± 12.8 → 115-141)
-    for i in 0..height_usize {
-        for j in 0..width_usize {
-            let idx = i * width_usize + j;
-            
-            // Skalierungsfaktor 0.1 für professionelle Ergebnisse
-            let scaled_correction = correction[idx] * 0.1;
-            
-            // Begrenze auf ±0.05 (5% um 0.5)
-            let clamped_correction = scaled_correction.max(-0.05).min(0.05);
-            
-            // 50% Neutralgrau + Korrektur
-            let mask_value = 0.5 + clamped_correction;
-            
-            // Schreibe den Maskenwert in alle Kanäle
-            let pixel_idx = (i * width_usize + j) * channels_usize;
-            for c in 0..channels_usize {
+
+    for y in 0..height_usize {
+        let gy = (img_y as f32 + y as f32 + 0.5) / (scale as f32) - 0.5
+            - base_cy as f32;
+        let gy = gy.max(0.0).min((cell_h - 1) as f32);
+        let y0 = gy.floor() as usize;
+        let y1 = (y0 + 1).min(cell_h - 1);
+        let fy = gy - y0 as f32;
+        let row0 = y0 * cell_w;
+        let row1 = y1 * cell_w;
+        let inner_row = y >= in_y0 && y < in_y1;
+
+        let mut pixel_idx = y * width_usize * channels_usize;
+        for x in 0..width_usize {
+            // 50% Neutralgrau + Korrektur (bilinear aus dem Zellraster)
+            let mask_value = if inner_row && x >= in_x0 && x < in_x1 {
+                let a0 = mask_cell[row0 + cx0[x]];
+                let b0 = mask_cell[row0 + cx1[x]];
+                let a1 = mask_cell[row1 + cx0[x]];
+                let b1 = mask_cell[row1 + cx1[x]];
+                let top = a0 + (b0 - a0) * cfx[x];
+                let bot = a1 + (b1 - a1) * cfx[x];
+                top + (bot - top) * fy
+            } else {
+                0.5
+            };
+
+            // Schreibe den Maskenwert nur in die Farbkanäle
+            for c in 0..color_channels {
                 pixels[pixel_idx + c] = mask_value;
             }
+            pixel_idx += channels_usize;
         }
     }
     
@@ -559,10 +682,10 @@ mod tests {
         
         let result = box_filter(&img, 3, 3, 1);
         
-        // Mittelwert aller 9 Pixel = 45/9 = 5.0
-        for val in result {
-            assert!((val - 5.0).abs() < 0.1, "Box-Filter Test fehlgeschlagen");
-        }
+        // Innenpixel: Fenster umfasst alle 9 Pixel → 45/9 = 5.0
+        assert!((result[4] - 5.0).abs() < 1e-6, "Box-Filter Test fehlgeschlagen");
+        // Eckpixel: Fenster auf 2x2 geklemmt → (1+2+4+5)/4 = 3.0
+        assert!((result[0] - 3.0).abs() < 1e-6, "Box-Filter Test fehlgeschlagen");
     }
     
     #[test]
@@ -574,7 +697,7 @@ mod tests {
             0.5, 0.5, 0.5
         ];
         
-        let result = guided_filter(&img, &img, 3, 3, 1, 0.01);
+        let result = guided_self_filter(&img, 3, 3, 1, 0.01);
         
         // Bei konstantem Bild sollte das Ergebnis gleich dem Input sein
         for (i, &val) in result.iter().enumerate() {

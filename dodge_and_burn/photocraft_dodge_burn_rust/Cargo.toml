@@ -2,12 +2,12 @@
 name = "photocraft-dodge-burn"
 version = "1.0.0"
 edition = "2021"
-authors = ["shortcircuit486"]
+authors = ["Daniel"]
 description = "Dodge & Burn Plugin for Photocraft (WASM)"
 license = "MIT"
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 # Keine externen Dependencies für maximale Kompatibilität

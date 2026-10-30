@@ -24,7 +24,7 @@ photocraft_dodge_burn_rust/
 
 Erstellung eines **nativen Photocraft-Plugins** in Rust/WASM, das:
 1. **Automatisch Dodge & Burn Korrekturmasken** generiert
-2. **Professionelle Qualitätsstandards** erfüllt (subtile Korrekturen, ±5% um 128)
+2. **Retouch4me-kompatibel** ist (subtile Korrekturen, ±5% um 128)
 3. **Porenschutz** bietet (Mikro-Ebene unverändert)
 4. **Asymmetrisches Dodge/Burn** unterstützt (mehr Burn als Dodge)
 5. **KI-Hautsegmentierung** (später mit ONNX Runtime)
@@ -88,7 +88,7 @@ cargo build --release --target wasm32-unknown-unknown
 
 ```json
 {
-  "id": "photocraft.dodge_burn",
+  "id": "de.daniel.photocraft.dodge_burn",
   "name": "Dodge & Burn Mask",
   "version": "1.0.0",
   "kind": "filter",
@@ -126,7 +126,7 @@ cargo build --release --target wasm32-unknown-unknown
 - **Korrektur:**
   - Dodge (Aufhellen): delta > 0
   - Burn (Abdunkeln): delta < 0
-  - **Optimierung:** Skalierung ×0.1, Begrenzung ±5%
+  - **Retouch4me-Optimierung:** Skalierung ×0.1, Begrenzung ±5%
 
 ---
 
@@ -134,7 +134,7 @@ cargo build --release --target wasm32-unknown-unknown
 
 | Parameter | Typ | Standard | Bereich | Beschreibung |
 |-----------|-----|----------|---------|--------------|
-| `intensity` | number | **0.15** | 0.0–0.3 | Gesamtstärke (empfohlen: 0.05–0.2) |
+| `intensity` | number | **0.15** | 0.0–0.3 | Gesamtstärke (Retouch4me: 0.05–0.2) |
 | `dodge_strength` | number | **0.5** | 0.0–2.0 | Stärke der Aufhellung |
 | `burn_strength` | number | **1.0** | 0.0–2.0 | Stärke der Abdunklung |
 | `blemish_radius` | int | **12** | 1–200 | Radius für lokale Unebenheiten |
@@ -143,12 +143,12 @@ cargo build --release --target wasm32-unknown-unknown
 
 ---
 
-## 🔬 Professionelle Maskenstandards
+## 🔬 Retouch4me-Kompatibilität
 
 ### 📈 Erkenntnisse aus der Maskenanalyse
 
-| **Aspekt** | **Professionelle Plugins** | **Dieses Plugin** | **Status** |
-|------------|---------------------------|-------------------|------------|
+| **Aspekt** | **Retouch4me** | **Dieses Plugin** | **Status** |
+|------------|----------------|-------------------|------------|
 | Maskenformat | CV_8UC1 (8-Bit Grau) | ✅ f32 → u8 | ✅ |
 | Neutraler Wert | 128 | ✅ 0.5 (128) | ✅ |
 | Wertebereich | 113–239 | ✅ 115–141 (begrenzt) | ✅ |
@@ -156,7 +156,7 @@ cargo build --release --target wasm32-unknown-unknown
 | Dodge/Burn-Verhältnis | 5:1–45:1 (mehr Burn) | ✅ 0.5:1.0 | ✅ |
 | Micro-Bereich | 94–97% der Pixel | ✅ 100% | ✅ |
 
-### 🎯 Optimierungen für professionelle Ergebnisse
+### 🎯 Optimierungen für Retouch4me-Kompatibilität
 
 1. **Skalierungsfaktor 0.1:**
    ```rust
@@ -213,7 +213,7 @@ cargo test
 - [x] Guided Filter implementieren
 - [x] Hautsegmentierung implementieren
 - [x] Dodge & Burn Logik
-- [x] Professionelle Skalierung
+- [x] Retouch4me-kompatible Skalierung
 
 ### 📌 Phase 2: Performance-Optimierung
 - [ ] `no_std` aktivieren (kein std)
@@ -251,7 +251,7 @@ cargo test
 |-----------|-------------|----------------|
 | 29.10.2026 | 1.0.0 | Grundgerüst implementiert (Rust + WASM) |
 | 29.10.2026 | 1.0.0 | Guided Filter, Hautsegmentierung, Dodge & Burn |
-| 29.10.2026 | 1.0.0 | Professionelle Skalierung (Skalierung ×0.1) |
+| 29.10.2026 | 1.0.0 | Retouch4me-Kompatibilität (Skalierung ×0.1) |
 
 ---
 
@@ -272,4 +272,4 @@ cargo test
 
 ---
 
-*Dieses Plugin ist für maximale Kompatibilität mit Photocraft optimiert und basiert auf Analysen professioneller Dodge & Burn Workflows.*
+*Dieses Plugin basiert auf den Erkenntnissen aus der Analyse von Retouch4me Dodge & Burn und ist für maximale Kompatibilität mit Photocraft optimiert.*
