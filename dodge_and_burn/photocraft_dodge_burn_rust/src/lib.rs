@@ -5,7 +5,7 @@
 //
 // Autor: Daniel
 // Datum: 30. Oktober 2026
-// Version: 1.5.0 (S1-S3: kontinuierliche Basiskurve + Röte-basierte Blemish-Spots)
+// Version: 1.6.0 (S4: Zellraster feiner, scale-Cap blemish_radius/3)
 
 // Standard-Bibliothek verwenden
 use std::slice;
@@ -24,7 +24,7 @@ const MAX_MEMORY: usize = 512 * 1024 * 1024; // 536870912 Bytes
 const MANIFEST: &str = r#"{
   "id": "de.daniel.photocraft.dodge_burn",
   "name": "Dodge & Burn Mask",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "kind": "filter",
   "author": "Daniel",
   "description": "Generiert eine 50% Neutralgrau-Maske für Dodge & Burn Korrekturen. Fügen Sie die Maske als Ebene mit Soft-Light-Modus ein.",
@@ -508,8 +508,10 @@ pub extern "C" fn pc_filter(
         let f = canvas_px as f64 / TARGET_CELLS as f64;
         scale = f.sqrt().ceil() as usize;
     }
-    // Radien müssen auf dem Zellraster darstellbar bleiben (>= 1 Zelle)
-    let scale = scale.max(1).min(blemish_radius.max(1) as usize);
+    // Zellraster fein genug halten, dass Blemish-Spots (Radius ~blemish_radius)
+    // mit mehreren Zellen aufgeloest werden: scale <= blemish_radius/3.
+    // (v1.5 deckelte auf blemish_radius — bei Vollbild s=8 wurde die Maske zu glatt.)
+    let scale = scale.max(1).min(((blemish_radius.max(1)) / 3).max(1) as usize);
 
     // Zellraster dokumentglobal ausrichten (via _image.x/_image.y), damit
     // benachbarte Bänder dasselbe Raster nutzen und keine Naht-Artefakte
