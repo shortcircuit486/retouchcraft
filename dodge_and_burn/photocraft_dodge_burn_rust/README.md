@@ -23,7 +23,7 @@ photocraft_dodge_burn_rust/
 ```bash
 ./build.sh                # baut target/.../photocraft_dodge_burn.wasm und kopiert es
                           # nach ../photocraft_dodge_burn/photocraft_dodge_burn.wasm
-cargo test                # 8 Tests (Unit + Integration)
+cargo test                # 9 Tests (Unit + Integration)
 cargo test --test test_plugin --release -- --ignored --nocapture   # Benchmarks
 ```
 
@@ -114,7 +114,7 @@ Instanzspeicher ~1 MB (v1.2 brauchte ~50 MB) → viele parallele Kacheln möglic
 ## 7. Tests
 
 ```bash
-cargo test                 # 4 Unit- (lib.rs) + 4 Integrationstests (tests/test_plugin.rs)
+cargo test                 # 4 Unit- (lib.rs) + 5 Integrationstests (tests/test_plugin.rs)
 ```
 
 Integrationstests: ABI-Version, Basislauf, **Alpha-Erhaltung bei RGBA**,
